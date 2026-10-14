@@ -3525,10 +3525,16 @@ TEST(incremental_shell_deploy_edit_keeps_its_edges) {
 /* Deleting the only file that starts a program leaves no Process node
  * behind -- a full index never makes one without a SPAWNS edge. One script
  * (pass_shell.c) and one Python call (pass_spawns.c) go; the program a kept
- * script starts stays. `legacy`: through the full-load route, else the
- * closure-repair route. Returns the Process count after the deletion, or -1;
- * *route: the route taken. */
-static int incremental_spawner_delete(bool legacy, cbm_incremental_route_t *route) {
+ * script starts stays. `legacy`: through the full-load route. `shell_only`:
+ * delete only the shell script so the delta carries no Python file with
+ * namespace facts and stays on the closure-repair route; including the
+ * Python spawner takes the forced-full route under the documented
+ * namespace-admission contract (a NULL fresh surface denotes deletion and
+ * valid Python metadata counts as a change, see
+ * cbm_lsp_surface_python_change). Returns the Process count after the
+ * deletion, or -1; *route: the route taken. */
+static int incremental_spawner_delete(bool legacy, bool shell_only,
+                                      cbm_incremental_route_t *route) {
     char tmp[256];
     snprintf(tmp, sizeof(tmp), "/tmp/cbm_spawngc_XXXXXX");
     if (!cbm_mkdtemp(tmp)) {
@@ -3545,8 +3551,10 @@ static int incremental_spawner_delete(bool legacy, cbm_incremental_route_t *rout
     char path[512];
     snprintf(path, sizeof(path), "%s/hack/a.sh", tmp);
     (void)remove(path);
-    snprintf(path, sizeof(path), "%s/app.py", tmp);
-    (void)remove(path);
+    if (!shell_only) {
+        snprintf(path, sizeof(path), "%s/app.py", tmp);
+        (void)remove(path);
+    }
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
     if (legacy) {
         cbm_pipeline_incremental_test_force_legacy_partial_once();
@@ -3562,11 +3570,19 @@ static int incremental_spawner_delete(bool legacy, cbm_incremental_route_t *rout
 
 TEST(incremental_deleted_spawner_drops_its_process) {
     cbm_incremental_route_t route = CBM_INCREMENTAL_ROUTE_NONE;
-    int left = incremental_spawner_delete(false, &route);
+    /* Shell-only deletion stays incremental: the closure repair drops the
+     * shell spawner's Process node while the Python spawner and the kept
+     * script remain. */
+    int left = incremental_spawner_delete(false, true, &route);
     ASSERT_EQ(route, CBM_INCREMENTAL_ROUTE_CLOSURE_REPAIR);
+    ASSERT_EQ(left, 2);
+    /* Deleting the Python spawner as well forces a full rebuild under the
+     * namespace-admission contract; both spawners are gone afterwards. */
+    left = incremental_spawner_delete(false, false, &route);
+    ASSERT_EQ(route, CBM_INCREMENTAL_ROUTE_FORCED_FULL);
     ASSERT_EQ(left, 1);
 #if defined(CBM_INCREMENTAL_TEST_API) && CBM_INCREMENTAL_TEST_API
-    left = incremental_spawner_delete(true, &route);
+    left = incremental_spawner_delete(true, false, &route);
     ASSERT_EQ(route, CBM_INCREMENTAL_ROUTE_LEGACY_PARTIAL);
     ASSERT_EQ(left, 1);
 #endif
